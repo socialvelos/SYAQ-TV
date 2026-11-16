@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.siyaq.tv">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- 1. صلاحيات الإنترنت وإبقاء الاتصال نشطاً -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -24,7 +23,7 @@
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
         android:hardwareAccelerated="true"
-        android:theme="@style/Theme.AppCompat.NoActionBar">
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
 
         <!-- الواجهة الرئيسية مع منع إعادة تشغيل النشاط عند فتح نافذة البث -->
         <activity
@@ -42,13 +41,6 @@
         <!-- الخدمة الأمامية المسؤولة عن تشغيل بث قراءة الشاشة -->
         <service
             android:name=".MainActivity$SiyaqScreenCaptureService"
-            android:enabled="true"
-            android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
-
-        <!-- خدمة احتياطية للتوافق مع ملفات المشروع السابقة -->
-        <service
-            android:name=".OverlaySubtitleService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
