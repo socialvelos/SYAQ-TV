@@ -8,10 +8,10 @@ android {
 
     defaultConfig {
         applicationId "com.syaq.tv"
-        minSdk 21
+        minSdk 23
         targetSdk 34
         versionCode 1
-        versionName "1.0"
+        versionName "1.5"
     }
 
     buildTypes {
@@ -24,4 +24,8 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
 }
