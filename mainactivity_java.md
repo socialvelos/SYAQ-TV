@@ -66,6 +66,7 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
@@ -73,29 +74,26 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
 
+    // ===== 1. إعدادات الهوية والأداء القابلة للتعديل =====
     private static final String COLOR_ACCENT = "#F5A623";
     private static final String COLOR_ACCENT_LIGHT = "#FFD066";
     private static final String COLOR_BG = "#050507";
     private static final String COLOR_TEXT = "#FFFFFF";
     private static final String COLOR_TEXT_SOFT = "#C5CCD8";
 
+    // سرعة قراءة الشاشة بالملي ثانية وحجم مربعات تشويه البكسلات في التمويه الذكي
     private static final long SCREEN_OCR_INTERVAL_MS = 500L;
     private static final int PIXEL_BLOCK_SIZE = 14;
-    private static final int CAPTURE_W = 1280;
-    private static final int CAPTURE_H = 720;
 
     private static final int REQ_OVERLAY_PERMISSION = 101;
     private static final int REQ_MEDIA_PROJECTION = 102;
 
-    private static MediaProjection sMediaProjection;
-    private static VirtualDisplay sVirtualDisplay;
-    private static ImageReader sImageReader;
-    private static Bitmap sLatestCleanGameBitmap;
-
+    // ===== 2. متغيرات الحالة والفصل التام بين وضع الكاميرا ووضع الشاشة =====
     private String roomCode;
     private boolean isArabic = true;
     private boolean isPhonePaired = false;
 
+    // يحدد الوضع النشط بدقة: "camera" أو "screen" لمنع أي تداخل بين الوضعين
     private String currentTvSubMode = "camera";
     private boolean isScreenTranslationRunning = false;
 
@@ -103,35 +101,45 @@ public class MainActivity extends Activity {
     private TextView codeView;
     private WebView qrAndMqttWebView;
 
+    // أزرار واجهة 1.5 مع فصل زر صلاحية الشاشة عن زر وضع البث
     private Button langToggleBtn;
     private Button btnTestBar;
     private Button btnNewCode;
-    private Button btnPerm;
-    private Button btnBroadcast;
+    private Button btnPerm;       // زر مستقل لتفعيل صلاحية الظهور فوق الشاشة
+    private Button btnBroadcast;  // زر مستقل لتفعيل وضع بث وقراءة الشاشة
     private Button btnUnpair;
 
     private LinearLayout centerClusterRow;
     private LinearLayout optionsColumn;
     private LinearLayout qrColumn;
 
+    // ===== 3. متغيرات الطبقة الشفافة المعزولة (Overlay) =====
     private WindowManager windowManager;
     private FrameLayout fullScreenOverlayStage;
-    private FrameLayout screenItemsOverlayLayer;
-    private FrameLayout subtitleBannerBox;
+    private FrameLayout screenItemsOverlayLayer; // طبقة وضع الشاشة فقط
+    private FrameLayout subtitleBannerBox;       // شريط وضع الكاميرا فقط
     private TextView subtitleTextView;
     private GradientDrawable boxBackground;
     private WindowManager.LayoutParams stageWindowParams;
     private PowerManager.WakeLock wakeLock;
 
+    // ===== 4. متغيرات بث الشاشة والقراءة الضوئية (MediaProjection + ML Kit) =====
     private MediaProjectionManager projectionManager;
+    private MediaProjection mediaProjection;
+    private VirtualDisplay virtualDisplay;
+    private ImageReader imageReader;
     private TextRecognizer mlkitRecognizer;
+    private Bitmap latestCleanGameBitmap;
     private boolean isCapturingFrame = false;
 
     private int realScreenW = 1920;
     private int realScreenH = 1080;
 
     private JSONObject lastStyleJson = null;
+    private JSONObject lastRoiJson = null;
+    private boolean lastOverlayOverText = false;
 
+    // ذاكرة تحميل وحفظ الخطوط العربية الخمسة
     private final Map<String, Typeface> customFontCache = new HashMap<>();
     private final ExecutorService fontDownloadExecutor = Executors.newSingleThreadExecutor();
 
@@ -151,6 +159,7 @@ public class MainActivity extends Activity {
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private Runnable autoHideTestRunnable;
 
+    // إبقاء محرك الاتصال نشطاً في الخلفية طوال وقت اللعب
     private final Runnable keepAliveRunnable = new Runnable() {
         @Override
         public void run() {
@@ -161,13 +170,14 @@ public class MainActivity extends Activity {
         }
     };
 
+    // حلقة القراءة الضوئية: تعمل حصرياً عندما يكون التلفاز في "وضع الشاشة" والترجمة نشطة
     private final Runnable screenOcrLoopRunnable = new Runnable() {
         @Override
         public void run() {
             if (isPhonePaired
                     && "screen".equals(currentTvSubMode)
                     && isScreenTranslationRunning
-                    && sImageReader != null
+                    && imageReader != null
                     && !isCapturingFrame) {
                 captureCleanGameScreenAndReadText();
             }
@@ -187,10 +197,11 @@ public class MainActivity extends Activity {
         }
     }
 
+    // خدمة أمامية رسمية لتشغيل بث الشاشة في أندرويد 10 إلى 14 دون رفض من النظام
     public static class SiyaqScreenCaptureService extends Service {
         @Override
         public int onStartCommand(Intent intent, int flags, int startId) {
-            String channelId = "siyaq_tv_capture_channel";
+            String channelId = "siyaq_tv_capture_ch";
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 NotificationChannel channel = new NotificationChannel(
                         channelId, "SIYAQ Screen Service", NotificationManager.IMPORTANCE_LOW);
@@ -202,7 +213,7 @@ public class MainActivity extends Activity {
                     : new Notification.Builder(this);
             Notification notification = builder
                     .setContentTitle("SIYAQ TV")
-                    .setContentText("بث قراءة الشاشة نشط")
+                    .setContentText("قارئ الشاشة والطبقة الشفافة قيد التشغيل")
                     .setSmallIcon(android.R.drawable.ic_menu_view)
                     .build();
 
@@ -226,14 +237,16 @@ public class MainActivity extends Activity {
         return Typeface.create("sans-serif-medium", Typeface.BOLD);
     }
 
+    // تحميل وتخزين خطوط الألعاب الخمسة بصيغة TTF
     private void preloadArabicGoogleFontsAsync() {
         fontDownloadExecutor.execute(new Runnable() {
             @Override
             public void run() {
                 File fontDir = new File(getFilesDir(), "siyaq_fonts_v2");
-                if (!fontDir.exists()) fontDir.mkdirs();
+                if (!fontDir.exists()) {
+                    fontDir.mkdirs();
+                }
                 boolean anyNewLoaded = false;
-
                 for (String[] entry : GOOGLE_ARABIC_FONTS) {
                     String key = entry[0];
                     String cssFamily = entry[1];
@@ -280,7 +293,9 @@ public class MainActivity extends Activity {
                                 FileOutputStream out = new FileOutputStream(outFile);
                                 byte[] buf = new byte[8192];
                                 int n;
-                                while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+                                while ((n = in.read(buf)) != -1) {
+                                    out.write(buf, 0, n);
+                                }
                                 out.close();
                                 in.close();
                             }
@@ -334,6 +349,7 @@ public class MainActivity extends Activity {
         return Typeface.create("sans-serif-medium", isBold ? Typeface.BOLD : Typeface.NORMAL);
     }
 
+    // فيو رسم شعار SIYAQ الهندسي الأصلي (واجهة 1.5)
     private class SiyaqWordmarkLogoView extends View {
         private final Paint whitePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint accentBarPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -465,12 +481,14 @@ public class MainActivity extends Activity {
         int screenW = dm.widthPixels;
         int screenH = dm.heightPixels;
 
+        // ================= بناء واجهة 1.5 مع فصل زر الصلاحية عن زر البث =================
         FrameLayout rootFrame = new FrameLayout(this);
         rootFrame.setBackgroundColor(Color.parseColor(COLOR_BG));
         int padH = (int) (screenW * 0.05f);
         int padV = (int) (screenH * 0.04f);
         rootFrame.setPadding(padH, padV, padH, padV);
 
+        // 1. زر تغيير اللغة (فوق يسار)
         langToggleBtn = new Button(this);
         langToggleBtn.setText("EN / ع");
         langToggleBtn.setFocusable(true);
@@ -504,6 +522,7 @@ public class MainActivity extends Activity {
                 Gravity.TOP | Gravity.LEFT);
         rootFrame.addView(langToggleBtn, langLp);
 
+        // 2. الشعار فوق في المنتصف + حالة الاتصال والوضع تحته
         LinearLayout topLogoContainer = new LinearLayout(this);
         topLogoContainer.setOrientation(LinearLayout.VERTICAL);
         topLogoContainer.setGravity(Gravity.CENTER);
@@ -527,10 +546,12 @@ public class MainActivity extends Activity {
                 Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         rootFrame.addView(topLogoContainer, topLogoLp);
 
+        // 3. الحاوية الوسطى
         centerClusterRow = new LinearLayout(this);
         centerClusterRow.setOrientation(LinearLayout.HORIZONTAL);
         centerClusterRow.setGravity(Gravity.CENTER);
 
+        // --- عمود الباركود والكود ---
         qrColumn = new LinearLayout(this);
         qrColumn.setOrientation(LinearLayout.VERTICAL);
         qrColumn.setGravity(Gravity.CENTER);
@@ -562,6 +583,7 @@ public class MainActivity extends Activity {
         codeView.setPadding(0, 22, 0, 0);
         qrColumn.addView(codeView);
 
+        // --- عمود الخيارات (مع فصل زر صلاحية الشاشة عن زر وضع البث) ---
         optionsColumn = new LinearLayout(this);
         optionsColumn.setOrientation(LinearLayout.VERTICAL);
         optionsColumn.setGravity(Gravity.CENTER_VERTICAL);
@@ -584,6 +606,7 @@ public class MainActivity extends Activity {
         });
         optionsColumn.addView(btnNewCode);
 
+        // الزر رقم 3: مخصص فقط لصلاحية الظهور فوق الشاشة (Overlay Permission)
         btnPerm = createCleanTextButton("تفعيل صلاحية الشاشة", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -592,6 +615,7 @@ public class MainActivity extends Activity {
         });
         optionsColumn.addView(btnPerm);
 
+        // الزر رقم 4 (منفصل تماماً): مخصص فقط لتفعيل وضع بث الشاشة (Screen Broadcast)
         btnBroadcast = createCleanTextButton("تفعيل وضع البث", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -636,7 +660,7 @@ public class MainActivity extends Activity {
         colLp.setMargins(96, 0, 96, 0);
 
         boolean overlayReady = canDrawOverlaySafely();
-        boolean broadcastReady = (sMediaProjection != null && sImageReader != null);
+        boolean broadcastReady = (mediaProjection != null && imageReader != null);
 
         if (isArabic) {
             centerClusterRow.addView(qrColumn, colLp);
@@ -737,6 +761,7 @@ public class MainActivity extends Activity {
         return btn;
     }
 
+    // ===== 5. الدالتان المنفصلتان: واحدة لصلاحية الطبقة وواحدة لوضع البث =====
     private boolean canDrawOverlaySafely() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
         try {
@@ -746,6 +771,7 @@ public class MainActivity extends Activity {
         }
     }
 
+    // الزر الأول: تفعيل صلاحية الظهور فوق الشاشة فقط
     private void requestOverlayPermissionOnly() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !canDrawOverlaySafely()) {
             try {
@@ -760,7 +786,7 @@ public class MainActivity extends Activity {
                     return;
                 } catch (Exception e2) {
                     ensureOverlayStageCreated();
-                    Toast.makeText(this, isArabic ? "تم تفعيل الطبقة المتوافقة مع التلفاز ✓" : "TV Overlay Active ✓", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(this, isArabic ? "تم تفعيل وضع الطبقة المتوافق مع التلفاز ✓" : "TV Overlay Active ✓", Toast.LENGTH_SHORT).show();
                     return;
                 }
             }
@@ -770,13 +796,15 @@ public class MainActivity extends Activity {
         Toast.makeText(this, isArabic ? "صلاحية الشاشة مفعّلة ✓" : "Screen Permission Active ✓", Toast.LENGTH_SHORT).show();
     }
 
+    // الزر الثاني: تفعيل وضع البث (MediaProjection) فقط مع تشغيل الخدمة الأمامية أولاً
     private void requestScreenBroadcastOnly() {
-        if (sMediaProjection != null && sImageReader != null) {
+        if (mediaProjection != null && imageReader != null) {
             applyLanguageAndLayoutDirection();
             Toast.makeText(this, isArabic ? "وضع البث مفعّل وجاهز ✓" : "Screen Broadcast Active ✓", Toast.LENGTH_SHORT).show();
             return;
         }
 
+        // تشغيل الخدمة الأمامية قبل طلب نافذة البث لضمان قبول النظام للبث من أول مرة
         try {
             Intent svcIntent = new Intent(this, SiyaqScreenCaptureService.class);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -794,7 +822,7 @@ public class MainActivity extends Activity {
                 startActivityForResult(projectionManager.createScreenCaptureIntent(), REQ_MEDIA_PROJECTION);
             }
         } catch (Exception e) {
-            Toast.makeText(this, isArabic ? "تعذر فتح نافذة البث" : "Broadcast error", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, isArabic ? "تعذر فتح نافذة البث في هذا الجهاز" : "Broadcast not supported", Toast.LENGTH_LONG).show();
         }
     }
 
@@ -805,9 +833,10 @@ public class MainActivity extends Activity {
         if (requestCode == REQ_OVERLAY_PERMISSION) {
             ensureOverlayStageCreated();
             applyLanguageAndLayoutDirection();
-            Toast.makeText(this, isArabic ? "تم تفعيل صلاحية الشاشة ✓" : "Permission Active ✓", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, isArabic ? "تم تحديث صلاحية الشاشة ✓" : "Permission updated ✓", Toast.LENGTH_SHORT).show();
         } else if (requestCode == REQ_MEDIA_PROJECTION) {
             if (resultCode == Activity.RESULT_OK && data != null) {
+                // تأكيد تشغيل الخدمة الأمامية ثم الانتظار 350ms قبل استدعاء getMediaProjection لمنع رفض أندرويد 10-14
                 try {
                     Intent svcIntent = new Intent(this, SiyaqScreenCaptureService.class);
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -839,13 +868,11 @@ public class MainActivity extends Activity {
     private void setupVirtualDisplayReader(int resultCode, Intent data) {
         try {
             releaseScreenCaptureResources();
-            if (projectionManager == null) {
-                projectionManager = (MediaProjectionManager) getSystemService(Context.MEDIA_PROJECTION_SERVICE);
-            }
-            sMediaProjection = projectionManager.getMediaProjection(resultCode, data);
-            if (sMediaProjection == null) return;
+            mediaProjection = projectionManager.getMediaProjection(resultCode, data);
+            if (mediaProjection == null) return;
 
-            sMediaProjection.registerCallback(new MediaProjection.Callback() {
+            // إلزامي في أندرويد 14+: تسجيل Callback قبل إنشاء VirtualDisplay حتى لا يتوقف البث
+            mediaProjection.registerCallback(new MediaProjection.Callback() {
                 @Override
                 public void onStop() {
                     super.onStop();
@@ -853,20 +880,20 @@ public class MainActivity extends Activity {
             }, uiHandler);
 
             int dpi = getResources().getDisplayMetrics().densityDpi;
-            sImageReader = ImageReader.newInstance(CAPTURE_W, CAPTURE_H, PixelFormat.RGBA_8888, 2);
-            sVirtualDisplay = sMediaProjection.createVirtualDisplay(
+            imageReader = ImageReader.newInstance(realScreenW, realScreenH, PixelFormat.RGBA_8888, 2);
+            virtualDisplay = mediaProjection.createVirtualDisplay(
                     "SiyaqTvCapture",
-                    CAPTURE_W,
-                    CAPTURE_H,
+                    realScreenW,
+                    realScreenH,
                     dpi,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    sImageReader.getSurface(),
+                    imageReader.getSurface(),
                     null,
                     uiHandler
             );
             ensureOverlayStageCreated();
         } catch (Exception e) {
-            Toast.makeText(this, "خطأ في بدء البث: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "Broadcast Init: " + e.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
 
@@ -928,6 +955,7 @@ public class MainActivity extends Activity {
         qrAndMqttWebView.loadDataWithBaseURL("https://siyaq.app", html, "text/html", "UTF-8", null);
     }
 
+    // ===== 6. استقبال الرسائل مع الفصل الصارم بين وضع الكاميرا ووضع الشاشة =====
     private void handleIncomingPhoneMessage(String jsonStr) {
         try {
             JSONObject obj = new JSONObject(jsonStr);
@@ -956,6 +984,7 @@ public class MainActivity extends Activity {
                 return;
             }
 
+            // تحديث المظهر بدون خلط بين الوضعين
             if ("STYLE_UPDATE".equals(type)) {
                 JSONObject style = obj.optJSONObject("style");
                 if (style != null) {
@@ -967,6 +996,7 @@ public class MainActivity extends Activity {
                 return;
             }
 
+            // التبديل الصارم بين وضع الكاميرا ووضع الشاشة
             if ("TV_MODE_SWITCH".equals(type)) {
                 String mode = obj.optString("mode", "");
                 String subMode = obj.optString("tvSubMode", "");
@@ -978,6 +1008,7 @@ public class MainActivity extends Activity {
                     currentTvSubMode = "screen";
                     isScreenTranslationRunning = active;
 
+                    // إخفاء شريط الكاميرا نهائياً في وضع الشاشة
                     if (subtitleBannerBox != null) {
                         subtitleTextView.setText("");
                         subtitleBannerBox.setVisibility(View.GONE);
@@ -988,10 +1019,12 @@ public class MainActivity extends Activity {
 
                     updateUiForPairingState(isPhonePaired);
 
+                    // إذا ضغط المستخدم "بدء ترجمة الشاشة" وكان البث مفعلاً، نلتقط أول إطار فوراً
                     if (active) {
-                        if (sMediaProjection != null && sImageReader != null) {
+                        if (mediaProjection != null && imageReader != null) {
                             captureCleanGameScreenAndReadText();
                         } else {
+                            // إذا نسي المستخدم تفعيل زر البث من التلفزيون، نفتح له نافذة الموافقة لمرة واحدة فقط
                             Intent bringFront = new Intent(this, MainActivity.class);
                             bringFront.addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT | Intent.FLAG_ACTIVITY_SINGLE_TOP);
                             startActivity(bringFront);
@@ -1001,6 +1034,8 @@ public class MainActivity extends Activity {
                 } else {
                     currentTvSubMode = "camera";
                     isScreenTranslationRunning = false;
+
+                    // مسح طبقة وضع الشاشة نهائياً عند التبديل لوضع الكاميرا
                     if (screenItemsOverlayLayer != null) {
                         screenItemsOverlayLayer.removeAllViews();
                     }
@@ -1009,6 +1044,17 @@ public class MainActivity extends Activity {
                 return;
             }
 
+            if ("ROI_UPDATE".equals(type)) {
+                lastOverlayOverText = obj.optBoolean("overlayOverText", lastOverlayOverText);
+                JSONObject roi = obj.optJSONObject("roi");
+                if (roi != null) lastRoiJson = roi;
+                if (lastStyleJson != null && "camera".equals(currentTvSubMode)) {
+                    applySmoothHardwareSubtitleStyle(lastStyleJson);
+                }
+                return;
+            }
+
+            // لحظة مسح الباركود والاقتران: التعرف الفوري على الوضع المختار في الجوال
             if ("PAIRED".equals(type)) {
                 isPhonePaired = true;
                 ensureOverlayStageCreated();
@@ -1017,14 +1063,18 @@ public class MainActivity extends Activity {
                 currentTvSubMode = "screen".equals(incomingSubMode) ? "screen" : "camera";
                 isScreenTranslationRunning = obj.optBoolean("active", false);
 
+                lastOverlayOverText = obj.optBoolean("overlayOverText", false);
+                JSONObject roi = obj.optJSONObject("roi");
+                if (roi != null) lastRoiJson = roi;
                 JSONObject style = obj.optJSONObject("style");
                 if (style != null) lastStyleJson = style;
 
                 updateUiForPairingState(true);
 
                 if ("screen".equals(currentTvSubMode)) {
+                    // وضع الشاشة: إخفاء شريط الكاميرا تماماً
                     if (subtitleBannerBox != null) subtitleBannerBox.setVisibility(View.GONE);
-                    if (sMediaProjection == null || sImageReader == null) {
+                    if (mediaProjection == null || imageReader == null) {
                         Toast.makeText(this, isArabic ? "تم الاقتران (وضع الشاشة) — اختر البدء الآن لتفعيل البث" : "Paired (Screen Mode) — Allow Broadcast", Toast.LENGTH_LONG).show();
                         requestScreenBroadcastOnly();
                     } else {
@@ -1032,6 +1082,7 @@ public class MainActivity extends Activity {
                         moveTaskToBack(true);
                     }
                 } else {
+                    // وضع الكاميرا: إخفاء طبقة الشاشة وتشغيل شريط الكاميرا فقط
                     if (screenItemsOverlayLayer != null) screenItemsOverlayLayer.removeAllViews();
                     subtitleTextView.setText(isArabic ? "متصل بالجوال (وضع الكاميرا) — جاهز للترجمة" : "Connected (Camera Mode) — Ready");
                     subtitleBannerBox.setVisibility(View.VISIBLE);
@@ -1046,6 +1097,7 @@ public class MainActivity extends Activity {
                 return;
             }
 
+            // استقبال وعرض ترجمات وضع الشاشة فقط
             if ("SCREEN_OVERLAY_BATCH".equals(type)) {
                 if (!"screen".equals(currentTvSubMode)) return;
                 if (!isPhonePaired) {
@@ -1059,7 +1111,9 @@ public class MainActivity extends Activity {
                 return;
             }
 
+            // استقبال وعرض ترجمة وضع الكاميرا فقط
             if ("SUB_UPDATE".equals(type)) {
+                // إذا كان التلفزيون في وضع الشاشة، يرفض رسائل وضع الكاميرا لمنع التداخل
                 if ("screen".equals(currentTvSubMode) && !"camera".equals(obj.optString("tvSubMode", ""))) {
                     return;
                 }
@@ -1074,6 +1128,11 @@ public class MainActivity extends Activity {
                     screenItemsOverlayLayer.removeAllViews();
                 }
 
+                if (obj.has("overlayOverText")) {
+                    lastOverlayOverText = obj.optBoolean("overlayOverText", false);
+                }
+                JSONObject roi = obj.optJSONObject("roi");
+                if (roi != null) lastRoiJson = roi;
                 JSONObject style = obj.optJSONObject("style");
                 if (style != null) lastStyleJson = style;
 
@@ -1100,10 +1159,12 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
+    // ===== 7. التقاط الشاشة المعزول تحت الطبقة الشفافة وإرسال النصوص للجوال =====
     private void captureCleanGameScreenAndReadText() {
-        if (sImageReader == null || mlkitRecognizer == null) return;
+        if (imageReader == null || mlkitRecognizer == null) return;
         isCapturingFrame = true;
 
+        // إخفاء طبقة الترجمة لحظياً (30ms) لالتقاط النص الإنجليزي الأصلي تحتها بدون أي حرف عربي
         if (fullScreenOverlayStage != null) {
             fullScreenOverlayStage.setAlpha(0f);
         }
@@ -1113,42 +1174,43 @@ public class MainActivity extends Activity {
             public void run() {
                 Image img = null;
                 try {
-                    img = sImageReader.acquireLatestImage();
+                    img = imageReader.acquireLatestImage();
                     if (fullScreenOverlayStage != null) {
                         fullScreenOverlayStage.setAlpha(1f);
                     }
 
+                    // إذا كانت الشاشة ثابتة ولم يرسل ImageReader إطاراً جديداً، نعيد استخدام آخر إطار نظيف للعبة
                     if (img != null) {
                         Image.Plane[] planes = img.getPlanes();
                         ByteBuffer buffer = planes[0].getBuffer();
                         int pixelStride = planes[0].getPixelStride();
                         int rowStride = planes[0].getRowStride();
-                        int rowPadding = rowStride - pixelStride * CAPTURE_W;
+                        int rowPadding = rowStride - pixelStride * realScreenW;
 
                         Bitmap paddedBitmap = Bitmap.createBitmap(
-                                CAPTURE_W + rowPadding / pixelStride,
-                                CAPTURE_H,
+                                realScreenW + rowPadding / pixelStride,
+                                realScreenH,
                                 Bitmap.Config.ARGB_8888
                         );
                         paddedBitmap.copyPixelsFromBuffer(buffer);
                         img.close();
                         img = null;
 
-                        Bitmap cleanBitmap = Bitmap.createBitmap(paddedBitmap, 0, 0, CAPTURE_W, CAPTURE_H);
+                        Bitmap cleanBitmap = Bitmap.createBitmap(paddedBitmap, 0, 0, realScreenW, realScreenH);
                         paddedBitmap.recycle();
 
-                        if (sLatestCleanGameBitmap != null && !sLatestCleanGameBitmap.isRecycled()) {
-                            sLatestCleanGameBitmap.recycle();
+                        if (latestCleanGameBitmap != null && !latestCleanGameBitmap.isRecycled()) {
+                            latestCleanGameBitmap.recycle();
                         }
-                        sLatestCleanGameBitmap = cleanBitmap;
+                        latestCleanGameBitmap = cleanBitmap;
                     }
 
-                    if (sLatestCleanGameBitmap == null || sLatestCleanGameBitmap.isRecycled()) {
+                    if (latestCleanGameBitmap == null || latestCleanGameBitmap.isRecycled()) {
                         isCapturingFrame = false;
                         return;
                     }
 
-                    InputImage inputImage = InputImage.fromBitmap(sLatestCleanGameBitmap, 0);
+                    InputImage inputImage = InputImage.fromBitmap(latestCleanGameBitmap, 0);
                     mlkitRecognizer.process(inputImage)
                             .addOnSuccessListener(visionText -> {
                                 publishDetectedScreenBlocksToPhone(visionText);
@@ -1166,7 +1228,7 @@ public class MainActivity extends Activity {
                     isCapturingFrame = false;
                 }
             }
-        }, 35);
+        }, 30);
     }
 
     private void publishDetectedScreenBlocksToPhone(Text visionText) {
@@ -1180,12 +1242,13 @@ public class MainActivity extends Activity {
                 Rect box = block.getBoundingBox();
                 if (text.isEmpty() || box == null) continue;
 
-                if (text.matches(".*[\u0600-\u06FF].*")) continue;
+                // تجاهل أي نص عربي تماماً لمنع قراءة الترجمة نفسها
+                if (text.matches(".*[\\u0600-\\u06FF].*")) continue;
 
-                double normX = Math.max(0.0, Math.min(0.98, (double) box.left / CAPTURE_W));
-                double normY = Math.max(0.0, Math.min(0.98, (double) box.top / CAPTURE_H));
-                double normW = Math.max(0.04, Math.min(1.0 - normX, (double) box.width() / CAPTURE_W));
-                double normH = Math.max(0.025, Math.min(1.0 - normY, (double) box.height() / CAPTURE_H));
+                double normX = Math.max(0.0, Math.min(0.98, (double) box.left / realScreenW));
+                double normY = Math.max(0.0, Math.min(0.98, (double) box.top / realScreenH));
+                double normW = Math.max(0.04, Math.min(1.0 - normX, (double) box.width() / realScreenW));
+                double normH = Math.max(0.025, Math.min(1.0 - normY, (double) box.height() / realScreenH));
 
                 JSONObject bObj = new JSONObject();
                 bObj.put("id", "pos_" + Math.round(normX * 25) + "_" + Math.round(normY * 25) + "_" + idx);
@@ -1202,8 +1265,8 @@ public class MainActivity extends Activity {
             payload.put("type", "SCREEN_TEXTS_BATCH");
             payload.put("sender", "tv");
             payload.put("frameId", System.currentTimeMillis());
-            payload.put("screenWidth", CAPTURE_W);
-            payload.put("screenHeight", CAPTURE_H);
+            payload.put("screenWidth", realScreenW);
+            payload.put("screenHeight", realScreenH);
             payload.put("blocks", blocksArray);
 
             String escapedJson = JSONObject.quote(payload.toString());
@@ -1214,24 +1277,27 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    private BitmapDrawable buildTruePixelatedCamouflage(Bitmap gameBitmap, double normX, double normY, double normW, double normH) {
+    // ===== 8. ميزة «تشويه البكسلات» الحقيقية (Pixelation Camouflage) بعتامة 100% تخفي النص الأصلي تماماً =====
+    private BitmapDrawable buildTruePixelatedCamouflage(Bitmap gameBitmap, int x, int y, int w, int h) {
         try {
             if (gameBitmap == null || gameBitmap.isRecycled()) return null;
 
             int bmpW = gameBitmap.getWidth();
             int bmpH = gameBitmap.getHeight();
 
-            int safeX = Math.max(0, Math.min(bmpW - 4, (int) Math.round(normX * bmpW)));
-            int safeY = Math.max(0, Math.min(bmpH - 4, (int) Math.round(normY * bmpH)));
-            int safeW = Math.max(8, Math.min(bmpW - safeX, (int) Math.round(normW * bmpW)));
-            int safeH = Math.max(8, Math.min(bmpH - safeY, (int) Math.round(normH * bmpH)));
+            int safeX = Math.max(0, Math.min(bmpW - 4, x));
+            int safeY = Math.max(0, Math.min(bmpH - 4, y));
+            int safeW = Math.max(8, Math.min(bmpW - safeX, w));
+            int safeH = Math.max(8, Math.min(bmpH - safeY, h));
 
+            // 1. حساب اللون الأساسي المحيط بمنطقة النص (من الحواف الخارجية للمستطيل لضمان عدم أخذ بياض الحروف الإنجليزية)
             int borderR = 0, borderG = 0, borderB = 0, borderCount = 0;
-            int stepX = Math.max(2, safeW / 16);
-            int stepY = Math.max(2, safeH / 6);
+            int stepX = Math.max(2, safeW / 20);
+            int stepY = Math.max(2, safeH / 8);
 
-            int topSampleY = Math.max(0, safeY - 3);
-            int botSampleY = Math.min(bmpH - 1, safeY + safeH + 2);
+            // أخذ عينات من أعلى وأسفل المستطيل مباشرة (خلفية اللعبة الصافية حول النص)
+            int topSampleY = Math.max(0, safeY - 4);
+            int botSampleY = Math.min(bmpH - 1, safeY + safeH + 3);
             for (int sx = safeX; sx < safeX + safeW; sx += stepX) {
                 int pTop = gameBitmap.getPixel(sx, topSampleY);
                 int pBot = gameBitmap.getPixel(sx, botSampleY);
@@ -1241,8 +1307,8 @@ public class MainActivity extends Activity {
                 borderCount += 2;
             }
             for (int sy = safeY; sy < safeY + safeH; sy += stepY) {
-                int leftSampleX = Math.max(0, safeX - 3);
-                int rightSampleX = Math.min(bmpW - 1, safeX + safeW + 2);
+                int leftSampleX = Math.max(0, safeX - 4);
+                int rightSampleX = Math.min(bmpW - 1, safeX + safeW + 3);
                 int pLeft = gameBitmap.getPixel(leftSampleX, sy);
                 int pRight = gameBitmap.getPixel(rightSampleX, sy);
                 borderR += Color.red(pLeft) + Color.red(pRight);
@@ -1256,27 +1322,30 @@ public class MainActivity extends Activity {
             int baseB = borderCount > 0 ? borderB / borderCount : 38;
             int baseLum = (baseR * 77 + baseG * 150 + baseB * 29) >> 8;
 
+            // 2. إنشاء لوحة بكسلات مشوّهة (Mosaic Pixelation) صلبة بعتامة 100% (Alpha = 255)
             Bitmap mosaicBitmap = Bitmap.createBitmap(safeW, safeH, Bitmap.Config.ARGB_8888);
             Canvas canvas = new Canvas(mosaicBitmap);
             Paint blockPaint = new Paint();
             blockPaint.setStyle(Paint.Style.FILL);
             blockPaint.setAntiAlias(false);
 
-            int blockSize = Math.max(8, PIXEL_BLOCK_SIZE);
+            int blockSize = Math.max(10, PIXEL_BLOCK_SIZE);
 
             for (int by = 0; by < safeH; by += blockSize) {
                 for (int bx = 0; bx < safeW; bx += blockSize) {
                     int rSum = 0, gSum = 0, bSum = 0, count = 0;
 
-                    for (int dy = 0; dy < blockSize && (by + dy) < safeH; dy += 2) {
-                        for (int dx = 0; dx < blockSize && (bx + dx) < safeW; dx += 2) {
+                    // فحص البكسلات داخل كل مربع واستبعاد بكسلات الحروف الساطعة أو الحادة
+                    for (int dy = 0; dy < blockSize && (by + dy) < safeH; dy += 3) {
+                        for (int dx = 0; dx < blockSize && (bx + dx) < safeW; dx += 3) {
                             int px = gameBitmap.getPixel(safeX + bx + dx, safeY + by + dy);
                             int r = Color.red(px);
                             int g = Color.green(px);
                             int b = Color.blue(px);
                             int lum = (r * 77 + g * 150 + b * 29) >> 8;
 
-                            if (Math.abs(lum - baseLum) < 52 && lum < 180) {
+                            // إذا كان البكسل يمثل حرفاً أبيض ساطعاً يختلف بشدة عن محيط اللعبة، نستبعده ونستبدله بلون المحيط
+                            if (Math.abs(lum - baseLum) < 55 && lum < 185) {
                                 rSum += r;
                                 gSum += g;
                                 bSum += b;
@@ -1289,9 +1358,15 @@ public class MainActivity extends Activity {
                     int cellG = count > 0 ? (gSum / count) : baseG;
                     int cellB = count > 0 ? (bSum / count) : baseB;
 
-                    cellR = (int) (((cellR * 70 + baseR * 30) / 100) * 0.88f);
-                    cellG = (int) (((cellG * 70 + baseG * 30) / 100) * 0.88f);
-                    cellB = (int) (((cellB * 70 + baseB * 30) / 100) * 0.88f);
+                    // دمج لون الخلية مع لون المحيط بنسبة 30% لضمان تناسق مربعات البكسلات واختفاء أي أثر للحروف
+                    cellR = (cellR * 70 + baseR * 30) / 100;
+                    cellG = (cellG * 70 + baseG * 30) / 100;
+                    cellB = (cellB * 70 + baseB * 30) / 100;
+
+                    // تعتيم طفيف جداً (88%) ليبرز النص العربي بوضوح فوق البكسلات المشوّهة، مع عتامة 255 كاملة!
+                    cellR = (int) (cellR * 0.88f);
+                    cellG = (int) (cellG * 0.88f);
+                    cellB = (int) (cellB * 0.88f);
 
                     blockPaint.setColor(Color.argb(255, cellR, cellG, cellB));
                     canvas.drawRect(bx, by, Math.min(safeW, bx + blockSize), Math.min(safeH, by + blockSize), blockPaint);
@@ -1299,13 +1374,14 @@ public class MainActivity extends Activity {
             }
 
             BitmapDrawable drawable = new BitmapDrawable(getResources(), mosaicBitmap);
-            drawable.setFilterBitmap(false);
+            drawable.setFilterBitmap(false); // الحفاظ على شكل مربعات البكسلات المشوّهة واضحاً
             return drawable;
         } catch (Exception e) {
             return null;
         }
     }
 
+    // ===== 9. إنشاء الطبقة الشفافة وضبط اتجاه LTR =====
     private void ensureOverlayStageCreated() {
         if (fullScreenOverlayStage != null) return;
 
@@ -1388,6 +1464,7 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
+    // ===== 10. رسم ترجمات وضع الشاشة بنفس حجم النص الأصلي مع تشويه البكسلات الصلب 100% =====
     private void renderScreenOverlayItems(JSONArray items) {
         if (screenItemsOverlayLayer == null) return;
         if (subtitleBannerBox != null) subtitleBannerBox.setVisibility(View.GONE);
@@ -1401,7 +1478,7 @@ public class MainActivity extends Activity {
         String textColorStr = lastStyleJson != null ? lastStyleJson.optString("textColor", "#FFFFFF") : "#FFFFFF";
         int textOpacity = lastStyleJson != null ? lastStyleJson.optInt("textOpacity", 100) : 100;
         String bgColorStr = lastStyleJson != null ? lastStyleJson.optString("bgColor", "#000000") : "#000000";
-        int bgOpacity = lastStyleJson != null ? lastStyleJson.optInt("bgOpacity", 95) : 95;
+        int bgOpacity = lastStyleJson != null ? lastStyleJson.optInt("bgOpacity", 92) : 92;
 
         int parsedTextCol;
         try { parsedTextCol = Color.parseColor(textColorStr); } catch (Exception e) { parsedTextCol = Color.WHITE; }
@@ -1421,12 +1498,13 @@ public class MainActivity extends Activity {
             double nw = item.optDouble("w", 0.2);
             double nh = item.optDouble("h", 0.05);
 
-            int padCoverX = 12;
+            // توسيع المستطيل بمقدار بسيط (10px أفقياً و 6px عمودياً) ليغطي حواف النص الإنجليزي بالكامل فلا يظهر منه شيء
+            int padCoverX = 10;
             int padCoverY = 6;
             int pxX = Math.max(0, (int) Math.round(nx * realScreenW) - padCoverX);
             int pxY = Math.max(0, (int) Math.round(ny * realScreenH) - padCoverY);
-            int pxW = Math.max(72, (int) Math.round(nw * realScreenW) + (padCoverX * 2));
-            int pxH = Math.max(34, (int) Math.round(nh * realScreenH) + (padCoverY * 2));
+            int pxW = Math.max(70, (int) Math.round(nw * realScreenW) + (padCoverX * 2));
+            int pxH = Math.max(32, (int) Math.round(nh * realScreenH) + (padCoverY * 2));
 
             TextView tv = new TextView(this);
             tv.setText(arText);
@@ -1436,17 +1514,20 @@ public class MainActivity extends Activity {
             tv.setGravity(Gravity.CENTER);
             tv.setTextDirection(View.TEXT_DIRECTION_RTL);
             tv.setIncludeFontPadding(false);
-            tv.setPadding(10, 4, 10, 4);
+            tv.setPadding(12, 4, 12, 4);
             tv.setShadowLayer(4f, 0f, 2f, Color.argb(245, 0, 0, 0));
 
+            // حساب حجم الخط تلقائياً ليتطابق مع حجم مستطيل النص الأصلي في اللعبة
+            float scaledDensity = getResources().getDisplayMetrics().scaledDensity;
             int charLen = Math.max(1, arText.length());
-            float heightBasedPx = pxH * 0.54f;
-            float areaBasedPx = (float) Math.sqrt((pxW * pxH) / (double) Math.max(4, charLen * 1.30));
-            float autoMatchedPx = Math.max(18f, Math.min(54f, Math.min(heightBasedPx, areaBasedPx * 1.25f)));
-            tv.setTextSize(TypedValue.COMPLEX_UNIT_PX, autoMatchedPx);
+            float heightBasedSp = (pxH * 0.54f) / scaledDensity;
+            float areaBasedSp = (float) Math.sqrt((pxW * pxH) / (double) Math.max(4, charLen * 1.35)) / scaledDensity;
+            float autoMatchedSp = Math.max(13f, Math.min(34f, Math.min(heightBasedSp, areaBasedSp * 1.25f)));
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, autoMatchedSp);
 
-            if (useCamouflage && sLatestCleanGameBitmap != null) {
-                BitmapDrawable pixelPatch = buildTruePixelatedCamouflage(sLatestCleanGameBitmap, nx, ny, nw, nh);
+            // تطبيق ميزة تشويه البكسلات الصلبة (100% غير شفافة) أو لون الخلفية المخصص
+            if (useCamouflage && latestCleanGameBitmap != null) {
+                BitmapDrawable pixelPatch = buildTruePixelatedCamouflage(latestCleanGameBitmap, pxX, pxY, pxW, pxH);
                 if (pixelPatch != null) {
                     tv.setBackground(pixelPatch);
                 } else {
@@ -1462,6 +1543,7 @@ public class MainActivity extends Activity {
                 tv.setBackground(customBg);
             }
 
+            // وضع الترجمة بنفس موقع وحجم النص الأصلي بالضبط
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(pxW, pxH, Gravity.TOP | Gravity.LEFT);
             lp.leftMargin = Math.max(0, Math.min(realScreenW - pxW, pxX));
             lp.topMargin = Math.max(0, Math.min(realScreenH - pxH, pxY));
@@ -1489,6 +1571,7 @@ public class MainActivity extends Activity {
         subtitleBannerBox.setTranslationY(targetY);
     }
 
+    // ===== 11. تطبيق إعدادات وضع الكاميرا (لون الخلفية، شفافيتها، عرضها، طولها، بدون أي تمويه) =====
     private void applySmoothHardwareSubtitleStyle(JSONObject style) {
         if (fullScreenOverlayStage == null || subtitleBannerBox == null || subtitleTextView == null) return;
         try {
@@ -1515,6 +1598,7 @@ public class MainActivity extends Activity {
                     Color.blue(parsedTextCol)
             ));
 
+            // في وضع الكاميرا: نطبق فقط لون الخلفية وشفافيتها وعرضها وطولها المحدد من المستخدم (بدون تمويه)
             String bgColorStr = style.optString("bgColor", "#000000");
             int bgOpacity = style.optInt("bgOpacity", 85);
             int parsedBgCol;
@@ -1531,6 +1615,7 @@ public class MainActivity extends Activity {
             ));
             subtitleBannerBox.setBackground(boxBackground);
 
+            // تطبيق عرض وطول الخلفية المخصصين من الجوال
             int bgWidthPct = Math.max(25, Math.min(100, style.optInt("bgWidth", 92)));
             int bgHeightPx = Math.max(4, Math.min(32, style.optInt("bgHeight", 10)));
             int maxWidthPx = (int) (realScreenW * (bgWidthPct / 100f));
@@ -1587,26 +1672,26 @@ public class MainActivity extends Activity {
 
     private void releaseScreenCaptureResources() {
         try {
-            if (sVirtualDisplay != null) {
-                sVirtualDisplay.release();
-                sVirtualDisplay = null;
+            if (virtualDisplay != null) {
+                virtualDisplay.release();
+                virtualDisplay = null;
             }
-            if (sImageReader != null) {
-                sImageReader.close();
-                sImageReader = null;
+            if (imageReader != null) {
+                imageReader.close();
+                imageReader = null;
             }
-            if (sMediaProjection != null) {
-                sMediaProjection.stop();
-                sMediaProjection = null;
+            if (mediaProjection != null) {
+                mediaProjection.stop();
+                mediaProjection = null;
             }
         } catch (Exception ignored) {}
     }
 
     private void updateUiForPairingState(boolean paired) {
         if (paired) {
-            String modeAr = "screen".equals(currentTvSubMode) ? " (وضع الشاشة)" : " (وضع الكاميرا)";
-            String modeEn = "screen".equals(currentTvSubMode) ? " (Screen Mode)" : " (Camera Mode)";
-            statusBadge.setText(isArabic ? "● متصل بالجوال" + modeAr : "● Phone Connected" + modeEn);
+            String modeLabelAr = "screen".equals(currentTvSubMode) ? " (وضع الشاشة)" : " (وضع الكاميرا)";
+            String modeLabelEn = "screen".equals(currentTvSubMode) ? " (Screen Mode)" : " (Camera Mode)";
+            statusBadge.setText(isArabic ? "● متصل بالجوال" + modeLabelAr : "● Phone Connected" + modeLabelEn);
             statusBadge.setTextColor(Color.parseColor(COLOR_ACCENT));
         } else {
             statusBadge.setText(isArabic ? "غير متصل" : "Not Connected");
@@ -1620,6 +1705,7 @@ public class MainActivity extends Activity {
         fontDownloadExecutor.shutdownNow();
         uiHandler.removeCallbacks(keepAliveRunnable);
         uiHandler.removeCallbacks(screenOcrLoopRunnable);
+        releaseScreenCaptureResources();
         if (wakeLock != null && wakeLock.isHeld()) {
             try {
                 wakeLock.release();
