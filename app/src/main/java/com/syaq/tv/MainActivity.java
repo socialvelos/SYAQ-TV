@@ -2423,19 +2423,19 @@ public class MainActivity extends Activity {
         }
 
         // إزالة البطاقات التي اختفت نصوصها فعلياً من الشاشة فقط (بعد 2 إطارات متتالية)
-        Iterator> it = stickyHudCardMap.entrySet().iterator();
-        while (it.hasNext()) {
-            Map.Entry<String, StickyHudCard> entry = it.next();
-            if (!activeKeysThisFrame.contains(entry.getKey())) {
-                StickyHudCard card = entry.getValue();
-                card.missedFrames++;
-                if (items == null || card.missedFrames >= 2) {
-                    if (card.view != null) {
-                        screenItemsOverlayLayer.removeView(card.view);
+for (String keyToCheck : new ArrayList<>(stickyHudCardMap.keySet())) {
+            if (!activeKeysThisFrame.contains(keyToCheck)) {
+                StickyHudCard card = stickyHudCardMap.get(keyToCheck);
+                if (card != null) {
+                    card.missedFrames++;
+                    if (items == null || card.missedFrames >= 2) {
+                        if (card.view != null) {
+                            screenItemsOverlayLayer.removeView(card.view);
+                        }
+                        stickyHudCardMap.remove(keyToCheck);
+                    } else {
+                        nextCaptureMasks.add(card.captureMaskRect);
                     }
-                    it.remove();
-                } else {
-                    nextCaptureMasks.add(card.captureMaskRect);
                 }
             }
         }
