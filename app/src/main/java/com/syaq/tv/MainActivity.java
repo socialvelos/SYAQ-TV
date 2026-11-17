@@ -78,21 +78,20 @@ import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
 
-    // ===== 1. المعلمات والثوابت المحسّنة للأداء الخفيف =====
+    // ===== 1. الثوابت وإعدادات الأداء الفائق =====
     private static final String COLOR_ACCENT = "#F5A623";
     private static final String COLOR_ACCENT_LIGHT = "#FFD066";
     private static final String COLOR_BG = "#050507";
     private static final String COLOR_TEXT = "#FFFFFF";
     private static final String COLOR_TEXT_SOFT = "#C5CCD8";
 
-    // فترة فحص متوازنة (600ms) ودقة 480p سريعة جداً تمنع تقطيع يوتيوب والألعاب نهائياً
-    private static final long SCREEN_OCR_INTERVAL_MS = 600L;
+    // فترة فحص 450ms على خيط خلفي + دقة 960x540 (نصف 1080p بالضبط) لخفة فائقة مع يوتيوب والألعاب
+    private static final long SCREEN_OCR_INTERVAL_MS = 450L;
     private static final long CAPTURE_TIMEOUT_MS = 2200L;
-    private static final long EMPTY_CLEAR_GRACE_MS = 900L;
     private static final int PIXEL_BLOCK_SIZE = 12;
 
-    private static final int CAPTURE_W = 854;
-    private static final int CAPTURE_H = 480;
+    private static final int CAPTURE_W = 960;
+    private static final int CAPTURE_H = 540;
 
     private static final int REQ_OVERLAY_PERMISSION = 101;
     private static final int REQ_MEDIA_PROJECTION = 102;
@@ -128,7 +127,7 @@ public class MainActivity extends Activity {
     private LinearLayout optionsColumn;
     private LinearLayout qrColumn;
 
-    // ===== 4. متغيرات الطبقة الشفافة والخيط الخلفي الخفيف =====
+    // ===== 4. متغيرات الطبقة الشفافة والخيط الخلفي =====
     private WindowManager windowManager;
     private FrameLayout fullScreenOverlayStage;
     private FrameLayout screenItemsOverlayLayer;
@@ -147,15 +146,11 @@ public class MainActivity extends Activity {
     private Handler ocrBgHandler;
     private final Paint maskOverlayPaint = new Paint();
 
-    // مصفوفة سريعة لكشف سكون الشاشة وتخطي الفحص عند عدم تغير المشهد
-    private final int[] prevFrameSampleGrid = new int[288];
-    private boolean hasPrevFrameSample = false;
-
-    // إحداثيات مربعات الترجمة العربية الحالية لتجاهلها أثناء قراءة الشاشة (صفر وميض)
+    // إحداثيات مربعات الترجمة العربية الحالية لتغطيتها في صورة الفحص المخفية فقط (صفر وميض)
     private final List<Rect> activeOverlayCaptureRects = Collections.synchronizedList(new ArrayList<Rect>());
     private String lastPublishedOcrSignature = "";
     private long lastPublishedOcrTime = 0L;
-    private long lastNonEmptyOverlayTime = 0L;
+    private String lastRenderedBatchSignature = "";
     private JSONArray lastScreenItemsArray = null;
 
     private int realScreenW = 1920;
@@ -189,7 +184,7 @@ public class MainActivity extends Activity {
             if (qrAndMqttWebView != null) {
                 qrAndMqttWebView.resumeTimers();
             }
-            uiHandler.postDelayed(this, 2500);
+            uiHandler.postDelayed(this, 3000);
         }
     };
 
@@ -362,6 +357,7 @@ public class MainActivity extends Activity {
                             if ("camera".equals(currentTvSubMode)) {
                                 applySmoothHardwareSubtitleStyle(lastStyleJson);
                             } else if (lastScreenItemsArray != null) {
+                                lastRenderedBatchSignature = "";
                                 renderScreenOverlayItems(lastScreenItemsArray);
                             }
                         }
@@ -655,7 +651,6 @@ public class MainActivity extends Activity {
         });
         optionsColumn.addView(btnPerm);
 
-        // زر البث يعمل كزر تشغيل أو إيقاف نهائي للبث عند الضغط عليه
         btnBroadcast = createCleanTextButton("تفعيل وضع البث", new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -808,7 +803,6 @@ public class MainActivity extends Activity {
         return btn;
     }
 
-    // ===== 5. إدارة صلاحية الشاشة ووضع البث وإيقافه النهائي =====
     private boolean canDrawOverlaySafely() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
         try {
@@ -860,13 +854,12 @@ public class MainActivity extends Activity {
         }
     }
 
-    // إيقاف البث والخدمة الأمامية وتفريغ الموارد بالكامل
     private void stopScreenBroadcastCompletely() {
         isScreenTranslationRunning = false;
         isCapturingFrame = false;
-        hasPrevFrameSample = false;
         activeOverlayCaptureRects.clear();
         lastPublishedOcrSignature = "";
+        lastRenderedBatchSignature = "";
         lastScreenItemsArray = null;
 
         if (screenItemsOverlayLayer != null) {
@@ -945,7 +938,8 @@ public class MainActivity extends Activity {
             }, uiHandler);
 
             int dpi = getResources().getDisplayMetrics().densityDpi;
-            sImageReader = ImageReader.newInstance(CAPTURE_W, CAPTURE_H, PixelFormat.RGBA_8888, 2);
+            // استخدام 3 مخازن مؤقتة لمنع اختناق SurfaceFlinger أثناء تشغيل يوتيوب 60fps
+            sImageReader = ImageReader.newInstance(CAPTURE_W, CAPTURE_H, PixelFormat.RGBA_8888, 3);
             sVirtualDisplay = sMediaProjection.createVirtualDisplay(
                     "SiyaqTvCapture",
                     CAPTURE_W,
@@ -1009,7 +1003,7 @@ public class MainActivity extends Activity {
                 "window.mqttClient = null;" +
                 "try {" +
                 "  window.mqttClient = mqtt.connect('wss://broker.emqx.io:8084/mqtt', {" +
-                "    keepalive: 15," +
+                "    keepalive: 20," +
                 "    reconnectPeriod: 800," +
                 "    clean: true" +
                 "  });" +
@@ -1020,7 +1014,6 @@ public class MainActivity extends Activity {
         qrAndMqttWebView.loadDataWithBaseURL("https://siyaq.app", html, "text/html", "UTF-8", null);
     }
 
-    // ===== 6. معالجة رسائل الجوال مع الإيقاف الكامل للبث عند إلغاء الاقتران =====
     private void handleIncomingPhoneMessage(String jsonStr) {
         try {
             JSONObject obj = new JSONObject(jsonStr);
@@ -1048,6 +1041,7 @@ public class MainActivity extends Activity {
                 }
                 activeOverlayCaptureRects.clear();
                 lastPublishedOcrSignature = "";
+                lastRenderedBatchSignature = "";
                 lastScreenItemsArray = null;
                 return;
             }
@@ -1059,6 +1053,7 @@ public class MainActivity extends Activity {
                     if ("camera".equals(currentTvSubMode)) {
                         applySmoothHardwareSubtitleStyle(style);
                     } else if (lastScreenItemsArray != null) {
+                        lastRenderedBatchSignature = "";
                         renderScreenOverlayItems(lastScreenItemsArray);
                     }
                 }
@@ -1076,7 +1071,7 @@ public class MainActivity extends Activity {
                     currentTvSubMode = "screen";
                     isScreenTranslationRunning = active;
                     lastPublishedOcrSignature = "";
-                    hasPrevFrameSample = false;
+                    lastRenderedBatchSignature = "";
 
                     if (subtitleBannerBox != null) {
                         subtitleTextView.setText("");
@@ -1107,6 +1102,7 @@ public class MainActivity extends Activity {
                     isScreenTranslationRunning = false;
                     activeOverlayCaptureRects.clear();
                     lastScreenItemsArray = null;
+                    lastRenderedBatchSignature = "";
                     if (screenItemsOverlayLayer != null) {
                         screenItemsOverlayLayer.removeAllViews();
                     }
@@ -1123,7 +1119,7 @@ public class MainActivity extends Activity {
                 currentTvSubMode = "screen".equals(incomingSubMode) ? "screen" : "camera";
                 isScreenTranslationRunning = obj.optBoolean("active", false);
                 lastPublishedOcrSignature = "";
-                hasPrevFrameSample = false;
+                lastRenderedBatchSignature = "";
 
                 JSONObject style = obj.optJSONObject("style");
                 if (style != null) lastStyleJson = style;
@@ -1166,19 +1162,10 @@ public class MainActivity extends Activity {
                 JSONObject style = obj.optJSONObject("style");
                 if (style != null) lastStyleJson = style;
 
+                // عرض فوري بدون أي مؤقتات تقديرية أو تأخير
                 JSONArray incomingItems = obj.optJSONArray("items");
-                if (incomingItems == null || incomingItems.length() == 0) {
-                    // مهلة ثبات قصيرة تمنع اختفاء الترجمة فجأة عند تغير إطار سريع في يوتيوب
-                    if (lastScreenItemsArray != null && (System.currentTimeMillis() - lastNonEmptyOverlayTime) < EMPTY_CLEAR_GRACE_MS) {
-                        return;
-                    }
-                    lastScreenItemsArray = null;
-                    renderScreenOverlayItems(null);
-                } else {
-                    lastNonEmptyOverlayTime = System.currentTimeMillis();
-                    lastScreenItemsArray = incomingItems;
-                    renderScreenOverlayItems(incomingItems);
-                }
+                lastScreenItemsArray = (incomingItems != null && incomingItems.length() > 0) ? incomingItems : null;
+                renderScreenOverlayItems(lastScreenItemsArray);
                 return;
             }
 
@@ -1198,6 +1185,7 @@ public class MainActivity extends Activity {
                 }
                 activeOverlayCaptureRects.clear();
                 lastScreenItemsArray = null;
+                lastRenderedBatchSignature = "";
 
                 JSONObject style = obj.optJSONObject("style");
                 if (style != null) lastStyleJson = style;
@@ -1225,32 +1213,7 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    // ===== 7. قراءة الشاشة بدون أي وميض ومع كاشف سكون لتخفيف الحمل على يوتيوب =====
-    private boolean hasFrameChangedSignificantly(Bitmap bmp) {
-        int stepX = CAPTURE_W / 24;
-        int stepY = CAPTURE_H / 12;
-        int idx = 0;
-        long diffSum = 0L;
-
-        for (int y = stepY / 2; y < CAPTURE_H && idx < 288; y += stepY) {
-            for (int x = stepX / 2; x < CAPTURE_W && idx < 288; x += stepX) {
-                int px = bmp.getPixel(x, y);
-                int lum = (((px >> 16) & 0xFF) * 77 + ((px >> 8) & 0xFF) * 150 + (px & 0xFF) * 29) >> 8;
-                if (hasPrevFrameSample) {
-                    diffSum += Math.abs(lum - prevFrameSampleGrid[idx]);
-                }
-                prevFrameSampleGrid[idx] = lum;
-                idx++;
-            }
-        }
-
-        if (!hasPrevFrameSample) {
-            hasPrevFrameSample = true;
-            return true;
-        }
-        return (diffSum / 288L) >= 2L;
-    }
-
+    // ===== 7. قراءة الشاشة في خيط خلفي خفيف بدون وميض (صفر setAlpha) =====
     private void captureCleanGameScreenAndReadText() {
         if (sImageReader == null || mlkitRecognizer == null || ocrBgHandler == null) return;
         isCapturingFrame = true;
@@ -1308,12 +1271,6 @@ public class MainActivity extends Activity {
                         return;
                     }
 
-                    // إذا كانت الشاشة ساكنة ولم يتغير شيء، نتخطى ML Kit لتوفير طاقة المعالج
-                    if (!hasFrameChangedSignificantly(sLatestCleanGameBitmap) && !lastPublishedOcrSignature.isEmpty()) {
-                        isCapturingFrame = false;
-                        return;
-                    }
-
                     if (sReusableOcrBitmap == null
                             || sReusableOcrBitmap.isRecycled()
                             || sReusableOcrBitmap.getWidth() != CAPTURE_W
@@ -1321,7 +1278,7 @@ public class MainActivity extends Activity {
                         sReusableOcrBitmap = Bitmap.createBitmap(CAPTURE_W, CAPTURE_H, Bitmap.Config.ARGB_8888);
                     }
 
-                    // نسخ لقطة الشاشة ثم تغطية مربعات الترجمة العربية فقط في نسخة الفحص حتى لا يراها القارئ أبداً
+                    // نسخ لقطة الشاشة ثم تغطية مربعات الترجمة العربية فقط في نسخة الفحص المخفية
                     Canvas ocrCanvas = new Canvas(sReusableOcrBitmap);
                     ocrCanvas.drawBitmap(sLatestCleanGameBitmap, 0f, 0f, null);
 
@@ -1383,7 +1340,7 @@ public class MainActivity extends Activity {
             int idx = 0;
 
             for (Text.TextBlock block : rawBlocks) {
-                if (idx >= 8) break;
+                if (idx >= 10) break;
                 String text = block.getText() != null ? block.getText().replace('\n', ' ').trim() : "";
                 Rect box = block.getBoundingBox();
                 if (text.isEmpty() || box == null) continue;
@@ -1395,11 +1352,11 @@ public class MainActivity extends Activity {
 
                 double normX = Math.max(0.0, Math.min(0.98, (double) box.left / CAPTURE_W));
                 double normY = Math.max(0.0, Math.min(0.98, (double) box.top / CAPTURE_H));
-                double normW = Math.max(0.04, Math.min(1.0 - normX, (double) box.width() / CAPTURE_W));
-                double normH = Math.max(0.025, Math.min(1.0 - normY, (double) box.height() / CAPTURE_H));
+                double normW = Math.max(0.03, Math.min(1.0 - normX, (double) box.width() / CAPTURE_W));
+                double normH = Math.max(0.022, Math.min(1.0 - normY, (double) box.height() / CAPTURE_H));
 
                 JSONObject bObj = new JSONObject();
-                bObj.put("id", "pos_" + Math.round(normX * 16) + "_" + Math.round(normY * 16) + "_" + idx);
+                bObj.put("id", "pos_" + Math.round(normX * 18) + "_" + Math.round(normY * 18) + "_" + idx);
                 bObj.put("text", text);
                 bObj.put("x", normX);
                 bObj.put("y", normY);
@@ -1409,9 +1366,9 @@ public class MainActivity extends Activity {
 
                 sigBuilder.append(onlyLetters.toLowerCase())
                         .append('@')
-                        .append(Math.round(normX * 12))
+                        .append(Math.round(normX * 14))
                         .append(':')
-                        .append(Math.round(normY * 12))
+                        .append(Math.round(normY * 14))
                         .append('|');
                 idx++;
             }
@@ -1419,6 +1376,7 @@ public class MainActivity extends Activity {
             String currentSig = blocksArray.length() == 0 ? "EMPTY" : sigBuilder.toString();
             long now = System.currentTimeMillis();
 
+            // إذا لم يتغير أي نص على الشاشة، لا نرسل حزمة مكررة عبر MQTT حتى لا يثقل التلفاز
             if (currentSig.equals(lastPublishedOcrSignature)) {
                 if ("EMPTY".equals(currentSig) || (now - lastPublishedOcrTime) < 3500L) {
                     return;
@@ -1450,7 +1408,6 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    // ===== 8. تشويه البكسلات السريع عند تفعيل خيار التمويه الذكي =====
     private BitmapDrawable buildTruePixelatedCamouflage(Bitmap gameBitmap, double normX, double normY, double normW, double normH) {
         try {
             if (gameBitmap == null || gameBitmap.isRecycled()) return null;
@@ -1510,7 +1467,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    // ===== 9. إنشاء الطبقة الشفافة وضبط اتجاه الإحداثيات LTR =====
     private void ensureOverlayStageCreated() {
         if (fullScreenOverlayStage != null) return;
 
@@ -1593,15 +1549,38 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    // ===== 10. رسم ترجمات وضع الشاشة: النصف السفلي (فوق النص) والنصف العلوي (تحت النص) =====
+    // ===== 10. التموضع الذكي بدون تغطية النصوص الإنجليزية (النصف السفلي فوق النص، العلوي تحته، والقوائم بجانبه) =====
+    private boolean collidesWithAnyOriginalRect(Rect candidate, List<Rect> allOrigRects, int skipIdx) {
+        for (int j = 0; j < allOrigRects.size(); j++) {
+            if (j == skipIdx) continue;
+            if (Rect.intersects(candidate, allOrigRects.get(j))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void renderScreenOverlayItems(JSONArray items) {
         if (screenItemsOverlayLayer == null) return;
         if (subtitleBannerBox != null) subtitleBannerBox.setVisibility(View.GONE);
 
+        if (items == null || items.length() == 0) {
+            if (!"EMPTY".equals(lastRenderedBatchSignature)) {
+                lastRenderedBatchSignature = "EMPTY";
+                screenItemsOverlayLayer.removeAllViews();
+                activeOverlayCaptureRects.clear();
+            }
+            return;
+        }
+
+        String batchSig = items.toString();
+        if (batchSig.equals(lastRenderedBatchSignature)) {
+            return;
+        }
+        lastRenderedBatchSignature = batchSig;
+
         screenItemsOverlayLayer.removeAllViews();
         activeOverlayCaptureRects.clear();
-
-        if (items == null || items.length() == 0) return;
 
         boolean useCamouflage = lastStyleJson != null && lastStyleJson.optBoolean("camouflageBlurMode", false);
         String fontFamilyRaw = lastStyleJson != null ? lastStyleJson.optString("fontFamily", "Tajawal") : "Tajawal";
@@ -1617,6 +1596,21 @@ public class MainActivity extends Activity {
         int textAlpha = textOpacity >= 99 ? 255 : Math.max(40, Math.min(255, Math.round(textOpacity * 2.55f)));
         int finalTextColor = Color.argb(textAlpha, Color.red(parsedTextCol), Color.green(parsedTextCol), Color.blue(parsedTextCol));
         Typeface tf = resolveRequestedArabicTypeface(fontFamilyRaw, isBold);
+
+        // جمع إحداثيات جميع النصوص الإنجليزية في الشاشة لمنع تغطية أي زر قائمة مجاور
+        List<Rect> allOriginalScreenRects = new ArrayList<>();
+        for (int i = 0; i < items.length(); i++) {
+            JSONObject it = items.optJSONObject(i);
+            if (it == null) {
+                allOriginalScreenRects.add(new Rect());
+                continue;
+            }
+            int ox = (int) Math.round(it.optDouble("x", 0.1) * realScreenW);
+            int oy = (int) Math.round(it.optDouble("y", 0.5) * realScreenH);
+            int ow = Math.max(60, (int) Math.round(it.optDouble("w", 0.2) * realScreenW));
+            int oh = Math.max(24, (int) Math.round(it.optDouble("h", 0.05) * realScreenH));
+            allOriginalScreenRects.add(new Rect(ox - 4, oy - 2, ox + ow + 4, oy + oh + 2));
+        }
 
         int halfScreenY = realScreenH / 2;
 
@@ -1635,27 +1629,49 @@ public class MainActivity extends Activity {
             int origX = (int) Math.round(nx * realScreenW);
             int origY = (int) Math.round(ny * realScreenH);
             int origW = Math.max(90, (int) Math.round(nw * realScreenW));
-            int origH = Math.max(32, (int) Math.round(nh * realScreenH));
+            int origH = Math.max(30, (int) Math.round(nh * realScreenH));
             int origCenterX = origX + (origW / 2);
             int origCenterY = origY + (origH / 2);
 
             int padH = Math.max(12, Math.round(bgHeightPad * 1.4f));
             int pxW = Math.min(realScreenW - 24, Math.max(110, origW + (padH * 2)));
-            int pxH = Math.max(38, Math.round(origH * 0.95f) + (bgHeightPad / 2));
+            int pxH = Math.max(36, Math.round(origH * 0.92f) + (bgHeightPad / 2));
 
-            // توسيط أفقي متوازن مع منتصف النص الإنجليزي الأصلي
-            int pxX = Math.max(12, Math.min(realScreenW - pxW - 12, origCenterX - (pxW / 2)));
+            int centeredX = Math.max(12, Math.min(realScreenW - pxW - 12, origCenterX - (pxW / 2)));
+            int aboveY = Math.max(8, origY - pxH - 6);
+            int belowY = Math.min(realScreenH - pxH - 8, origY + origH + 6);
 
-            // القاعدة الذكية للتموضع العمودي:
-            // - النصف السفلي من الشاشة: الترجمة فوق النص الأصلي
-            // - النصف العلوي من الشاشة: الترجمة تحت النص الأصلي
+            int pxX = centeredX;
             int pxY;
+
             if (useCamouflage) {
                 pxY = Math.max(6, Math.min(realScreenH - pxH - 6, origY - 2));
-            } else if (origCenterY >= halfScreenY) {
-                pxY = Math.max(8, origY - pxH - 6);
             } else {
-                pxY = Math.min(realScreenH - pxH - 8, origY + origH + 6);
+                // الأولوية حسب طلبك: النصف السفلي (فوق النص) والنصف العلوي (تحت النص)
+                int preferredY = (origCenterY >= halfScreenY) ? aboveY : belowY;
+                int alternateY = (origCenterY >= halfScreenY) ? belowY : aboveY;
+                Rect preferredRect = new Rect(pxX, preferredY, pxX + pxW, preferredY + pxH);
+                Rect alternateRect = new Rect(pxX, alternateY, pxX + pxW, alternateY + pxH);
+
+                if (!collidesWithAnyOriginalRect(preferredRect, allOriginalScreenRects, i)) {
+                    pxY = preferredY;
+                } else if (!collidesWithAnyOriginalRect(alternateRect, allOriginalScreenRects, i)) {
+                    pxY = alternateY;
+                } else {
+                    // في القوائم المزدحمة رأسياً: نضع الترجمة بجانب العنصر حتى لا تغطي السطر الذي تحته أو فوقه
+                    int rightX = origX + origW + 12;
+                    int leftX = origX - pxW - 12;
+                    int sideY = Math.max(8, Math.min(realScreenH - pxH - 8, origCenterY - (pxH / 2)));
+                    if (rightX + pxW <= realScreenW - 12) {
+                        pxX = rightX;
+                        pxY = sideY;
+                    } else if (leftX >= 12) {
+                        pxX = leftX;
+                        pxY = sideY;
+                    } else {
+                        pxY = preferredY;
+                    }
+                }
             }
 
             TextView tv = new TextView(this);
@@ -1697,11 +1713,10 @@ public class MainActivity extends Activity {
             lp.topMargin = pxY;
             screenItemsOverlayLayer.addView(tv, lp);
 
-            // تسجيل إحداثيات صندوق الترجمة العربية لحجبها في صورة الفحص المخفية فقط (صفر وميض)
-            int maskLeft = Math.max(0, (int) Math.floor(((double) pxX / realScreenW) * CAPTURE_W) - 5);
-            int maskTop = Math.max(0, (int) Math.floor(((double) pxY / realScreenH) * CAPTURE_H) - 5);
-            int maskRight = Math.min(CAPTURE_W, (int) Math.ceil(((double) (pxX + pxW) / realScreenW) * CAPTURE_W) + 5);
-            int maskBottom = Math.min(CAPTURE_H, (int) Math.ceil(((double) (pxY + pxH) / realScreenH) * CAPTURE_H) + 5);
+            int maskLeft = Math.max(0, (int) Math.floor(((double) pxX / realScreenW) * CAPTURE_W) - 4);
+            int maskTop = Math.max(0, (int) Math.floor(((double) pxY / realScreenH) * CAPTURE_H) - 4);
+            int maskRight = Math.min(CAPTURE_W, (int) Math.ceil(((double) (pxX + pxW) / realScreenW) * CAPTURE_W) + 4);
+            int maskBottom = Math.min(CAPTURE_H, (int) Math.ceil(((double) (pxY + pxH) / realScreenH) * CAPTURE_H) + 4);
             activeOverlayCaptureRects.add(new Rect(maskLeft, maskTop, maskRight, maskBottom));
         }
     }
@@ -1726,7 +1741,6 @@ public class MainActivity extends Activity {
         subtitleBannerBox.setTranslationY(targetY);
     }
 
-    // ===== 11. تطبيق مظهر وضع الكاميرا =====
     private void applySmoothHardwareSubtitleStyle(JSONObject style) {
         if (fullScreenOverlayStage == null || subtitleBannerBox == null || subtitleTextView == null) return;
         try {
@@ -1814,6 +1828,7 @@ public class MainActivity extends Activity {
     private void hideOverlayStage() {
         activeOverlayCaptureRects.clear();
         lastScreenItemsArray = null;
+        lastRenderedBatchSignature = "";
         if (fullScreenOverlayStage != null && windowManager != null) {
             try {
                 windowManager.removeView(fullScreenOverlayStage);
